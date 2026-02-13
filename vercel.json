@@ -2,7 +2,7 @@
 {
   "builds": [
     {
-      "src": "api/bot.py",
+      "src": "scheduler_bot.py",
       "use": "@vercel/python",
       "config": {
         "installCommand": "pip install --break-system-packages -r requirements.txt"
@@ -12,7 +12,7 @@
   "routes": [
     {
       "src": "/webhook",
-      "dest": "api/bot.py"
+      "dest": "scheduler_bot.py"
     }
   ]
 }
