@@ -2,32 +2,34 @@ import os
 import asyncio
 from datetime import datetime, timedelta
 import pytz
-from flask import Flask, request
-from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 import asyncpg
 
-TOKEN = os.environ['BOT_TOKEN']
-DATABASE_URL = os.environ['NEON_DATABASE_URL']
 
-# ---------- Flask app ----------
-app = Flask(__name__)
+TOKEN = os.getenv('BOT_TOKEN')
+DATABASE_URL = os.getenv('DB_link')
 
-# ---------- Telegram Application (global, no background tasks) ----------
-telegram_app = Application.builder().token(TOKEN).build()
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is not set.")
+if not DATABASE_URL:
+    raise RuntimeError("DB_link environment variable is not set.")
 
 # ---------- Database connection pool ----------
 db_pool = None
 
 async def init_db_pool():
     global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=2)
+    if db_pool is None:
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=2)
+    return db_pool
 
-@app.before_first_request
-def before_first_request():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(init_db_pool())
+async def get_db_pool():
+    """
+    Lazily initialize and return the global database pool.
+    Ensures we do not create a new pool per request.
+    """
+    return await init_db_pool()
 
 # ---------- Command Handlers (all async) ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -41,6 +43,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/setroutine <task_id> daily/weekly/monthly\n"
         "/help"
     )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show help message (same as /start)."""
+    await start(update, context)
 
 async def addtask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add a one-time task. Usage: /addtask 2025-03-20 15:30 Buy milk"""
@@ -57,7 +63,8 @@ async def addtask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scheduled = pytz.UTC.localize(scheduled)
         user_id = update.effective_user.id
 
-        async with db_pool.acquire() as conn:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
             task_id = await conn.fetchval(
                 "INSERT INTO tasks (user_id, description, scheduled_time) VALUES ($1, $2, $3) RETURNING id",
                 user_id, description, scheduled
@@ -69,7 +76,8 @@ async def addtask(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def mytasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List upcoming tasks"""
     user_id = update.effective_user.id
-    async with db_pool.acquire() as conn:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, description, scheduled_time FROM tasks WHERE user_id = $1 AND scheduled_time > NOW() ORDER BY scheduled_time LIMIT 20",
             user_id
@@ -85,13 +93,14 @@ async def deletetask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         task_id = int(context.args[0])
         user_id = update.effective_user.id
-        async with db_pool.acquire() as conn:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
             result = await conn.execute("DELETE FROM tasks WHERE id = $1 AND user_id = $2", task_id, user_id)
         if result == "DELETE 0":
             await update.message.reply_text("Task not found or not yours.")
         else:
             await update.message.reply_text("Task deleted.")
-    except:
+    except (IndexError, ValueError):
         await update.message.reply_text("Usage: /deletetask <task_id>")
 
 async def changetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -104,7 +113,8 @@ async def changetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_time = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
         new_time = pytz.UTC.localize(new_time)
         user_id = update.effective_user.id
-        async with db_pool.acquire() as conn:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
             result = await conn.execute(
                 "UPDATE tasks SET scheduled_time = $1 WHERE id = $2 AND user_id = $3",
                 new_time, task_id, user_id
@@ -113,7 +123,7 @@ async def changetime(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Task not found or not yours.")
         else:
             await update.message.reply_text("Task time updated.")
-    except:
+    except (IndexError, ValueError):
         await update.message.reply_text("Usage: /changetime <task_id> YYYY-MM-DD HH:MM")
 
 async def setroutine(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -125,7 +135,8 @@ async def setroutine(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Recurrence must be daily, weekly, or monthly.")
             return
         user_id = update.effective_user.id
-        async with db_pool.acquire() as conn:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
             result = await conn.execute(
                 "UPDATE tasks SET recurrence = $1 WHERE id = $2 AND user_id = $3",
                 recurrence, task_id, user_id
@@ -134,39 +145,22 @@ async def setroutine(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Task not found or not yours.")
         else:
             await update.message.reply_text(f"Task recurrence set to {recurrence}.")
-    except:
-        await update.message.reply_text("Usage: /setroutine <task_id> daily|weekly|monthly")
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: /setroutine <task_id> daily|weekly/monthly")
 
-# ---------- Register handlers with the Application ----------
-telegram_app.add_handler(CommandHandler('start', start))
-telegram_app.add_handler(CommandHandler('addtask', addtask))
-telegram_app.add_handler(CommandHandler('mytasks', mytasks))
-telegram_app.add_handler(CommandHandler('deletetask', deletetask))
-telegram_app.add_handler(CommandHandler('changetime', changetime))
-telegram_app.add_handler(CommandHandler('setroutine', setroutine))
-# Optional: catch-all for unknown commands
+
+# ---------- Unknown command handler ----------
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Sorry, I didn't understand that command.")
-telegram_app.add_handler(CommandHandler(None, unknown))  # This might need a different approach; better use MessageHandler with Filters.command
+    message = update.message
+    if message:
+        await message.reply_text("Sorry, I didn't understand that command.")
 
-# For unknown commands, you can use:
-from telegram.ext import MessageHandler, filters
-telegram_app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-# ---------- Webhook Endpoint ----------
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Receive Telegram update and process it."""
-    # Convert JSON to Update object
-    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    # Process the update asynchronously
-    asyncio.run(telegram_app.process_update(update))
-    return 'ok'
-
-# ---------- Task Checking Endpoint (for cron) ----------
-async def check_due_tasks():
+# ---------- Task Checking Job (runs periodically) ----------
+async def check_due_tasks(context: ContextTypes.DEFAULT_TYPE):
     """Find tasks due now and send reminders, then reschedule recurring tasks."""
-    async with db_pool.acquire() as conn:
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
         now = datetime.now(pytz.UTC)
         due_tasks = await conn.fetch(
             "SELECT * FROM tasks WHERE scheduled_time <= $1",
@@ -174,7 +168,7 @@ async def check_due_tasks():
         )
         for task in due_tasks:
             # Send reminder
-            await telegram_app.bot.send_message(
+            await context.bot.send_message(
                 chat_id=task['user_id'],
                 text=f"⏰ Reminder: {task['description']}"
             )
@@ -195,8 +189,29 @@ async def check_due_tasks():
                 # One-time task: delete it
                 await conn.execute("DELETE FROM tasks WHERE id = $1", task['id'])
 
-@app.route('/check-tasks', methods=['GET'])
-def check_tasks():
-    """Endpoint called by external cron service."""
-    asyncio.run(check_due_tasks())
-    return 'Checked'
+
+def main():
+    """Entry point: starts the bot with long polling and a periodic task checker."""
+    application = Application.builder().token(TOKEN).build()
+
+    # Register command handlers
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('addtask', addtask))
+    application.add_handler(CommandHandler('mytasks', mytasks))
+    application.add_handler(CommandHandler('deletetask', deletetask))
+    application.add_handler(CommandHandler('changetime', changetime))
+    application.add_handler(CommandHandler('setroutine', setroutine))
+
+    # Catch-all for unknown commands
+    application.add_handler(MessageHandler(filters.COMMAND, unknown))
+
+    # Schedule periodic task checking job (every 60 seconds)
+    application.job_queue.run_repeating(check_due_tasks, interval=60, first=10)
+
+    print("Scheduler bot is running with long polling...")
+    application.run_polling()
+
+
+if __name__ == "__main__":
+    main()
