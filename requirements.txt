@@ -1,4 +1,6 @@
 telebot
 psycopg2-binary
 pyTelegramBotAPI   
-python-telegram-bot apscheduler sqlalchemy
+python-telegram-bot 
+apscheduler 
+sqlalchemy
