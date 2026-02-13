@@ -6,7 +6,7 @@ bot_token = os.environ.get('BOT_TOKEN')
 bot = telebot.TeleBot(bot_token)
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "hello world XD for testing our feature use /add /delete /list /next_task commands")
+    bot.reply_to(message, "hello world ::: our feature /add /delete /list /next_task commands")
     print ("Received /start command from user: ", message.from_user.id)
 
 print ("Bot is running...")
