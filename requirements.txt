@@ -1,3 +1,6 @@
 pyTelegramBotAPI
 psycopg2-binary
 flask
+asyncpg
+pytz
+python-telegram-bot==20.7
